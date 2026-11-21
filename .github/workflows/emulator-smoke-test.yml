@@ -5,8 +5,11 @@ name: Emulator smoke test
 # the builder VM. Manual trigger only (Actions tab > Run workflow).
 # Free for this public repo. Uses the same unzip + JDK + SDK steps as
 # Android CI, then boots an API 36 emulator with KVM, installs the
-# debug APK, opens the app, taps the "Add entry" button and screenshots
-# both screens. Screenshots land as the "emulator-screenshots" artifact.
+# debug APK, seeds the app's built-in sample month (menu > Add sample
+# data) so the screenshots show real entries and charts, and captures
+# five store-quality screenshots: home, charts, budgets, help and the
+# add-entry sheet. Screenshots land as the "emulator-screenshots"
+# artifact.
 on:
   workflow_dispatch:
 
@@ -48,12 +51,18 @@ jobs:
       - name: Build debug APK
         run: ./gradlew --no-daemon assembleDebug
 
-      - name: Write the FAB tap helper
+      - name: Write the tap helper
         run: |
-          cat > tap_fab.py <<'PYEOF'
-          """Tap the "Add entry" button on the emulator via uiautomator dump."""
+          cat > tap_text.py <<'PYEOF'
+          """Tap a UI element on the emulator by its text or content description.
+
+          Usage: python3 tap_text.py "Add sample data"
+          Matches case-insensitively against node text + content-desc.
+          Exits 0 even when nothing is found (caller keeps going).
+          """
           import re, subprocess, sys, xml.etree.ElementTree as ET
 
+          want = sys.argv[1].lower()
           subprocess.run(["adb", "shell", "uiautomator", "dump", "/sdcard/window_dump.xml"], check=False)
           subprocess.run(["adb", "pull", "/sdcard/window_dump.xml", "window_dump.xml"], check=False)
           try:
@@ -63,7 +72,7 @@ jobs:
               sys.exit(0)
           for node in tree.iter("node"):
               desc = (node.get("content-desc") or "") + " " + (node.get("text") or "")
-              if "add entry" in desc.lower():
+              if want in desc.lower():
                   m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.get("bounds") or "")
                   if m:
                       x1, y1, x2, y2 = map(int, m.groups())
@@ -71,11 +80,11 @@ jobs:
                       print("tap helper: tapping", desc.strip(), "at", cx, cy)
                       subprocess.run(["adb", "shell", "input", "tap", str(cx), str(cy)])
                       sys.exit(0)
-          print("tap helper: 'Add entry' button not found, skipping tap")
+          print("tap helper: '" + sys.argv[1] + "' not found, skipping tap")
           PYEOF
 
       - name: Write the home-screen wait helper
-        # The wait is a separate script file (like tap_fab.py below): a
+        # The wait is a separate script file (like tap_text.py): a
         # multi-line for-loop inside the emulator step's script broke run
         # #3 — the runner only passed the loop's first line to the shell.
         run: |
@@ -112,12 +121,37 @@ jobs:
             adb install app/build/outputs/apk/debug/app-debug.apk
             adb shell am start -n com.clearledger.expenses/.MainActivity
             ./wait_home.sh
+            python3 tap_text.py "More options"
+            sleep 1
+            python3 tap_text.py "Add sample data"
+            sleep 3
             adb exec-out screencap -p > emulator-home.png
-            python3 tap_fab.py
+            adb shell input swipe 540 1800 540 600 600
+            sleep 1
+            adb shell input swipe 540 1800 540 600 600
+            sleep 1
+            adb exec-out screencap -p > emulator-charts.png
+            adb shell input swipe 540 600 540 1800 600
+            sleep 1
+            adb shell input swipe 540 600 540 1800 600
+            sleep 1
+            python3 tap_text.py "More options"
+            sleep 1
+            python3 tap_text.py "Budgets"
+            sleep 2
+            adb exec-out screencap -p > emulator-budgets.png
+            adb shell input keyevent 4
+            sleep 1
+            python3 tap_text.py "Help"
+            sleep 2
+            adb exec-out screencap -p > emulator-help.png
+            adb shell input keyevent 4
+            sleep 1
+            python3 tap_text.py "Add entry"
             sleep 3
             adb exec-out screencap -p > emulator-add.png
             adb logcat -d | tail -100 > emulator-logcat.txt || true
-            ls -l emulator-home.png emulator-add.png
+            ls -l emulator-home.png emulator-charts.png emulator-budgets.png emulator-help.png emulator-add.png
 
       - name: Upload screenshots
         if: always()
@@ -126,6 +160,9 @@ jobs:
           name: emulator-screenshots
           path: |
             emulator-home.png
+            emulator-charts.png
+            emulator-budgets.png
+            emulator-help.png
             emulator-add.png
             emulator-logcat.txt
           if-no-files-found: warn
