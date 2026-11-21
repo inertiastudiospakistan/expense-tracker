@@ -87,7 +87,17 @@ jobs:
           script: |
             adb install app/build/outputs/apk/debug/app-debug.apk
             adb shell am start -n com.clearledger.expenses/.MainActivity
-            sleep 6
+            # Wait until the home screen is actually up before screenshotting:
+            # on a cold emulator the app can sit on its splash icon for
+            # several seconds, and a fixed sleep photographs the splash.
+            for i in $(seq 1 30); do
+              adb shell uiautomator dump /sdcard/window_dump.xml >/dev/null 2>&1
+              if adb shell grep -q "ClearLedger" /sdcard/window_dump.xml 2>/dev/null; then
+                echo "home screen visible after ${i}s"
+                break
+              fi
+              sleep 1
+            done
             adb exec-out screencap -p > emulator-home.png
             python3 tap_fab.py
             sleep 3
