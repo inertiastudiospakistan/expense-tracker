@@ -74,6 +74,30 @@ jobs:
           print("tap helper: 'Add entry' button not found, skipping tap")
           PYEOF
 
+      - name: Write the home-screen wait helper
+        # The wait is a separate script file (like tap_fab.py below): a
+        # multi-line for-loop inside the emulator step's script broke run
+        # #3 — the runner only passed the loop's first line to the shell.
+        run: |
+          cat > wait_home.sh <<'SHEOF'
+          #!/bin/sh
+          # Wait until the home screen is actually up before screenshotting:
+          # on a cold emulator the app can sit on its splash icon for
+          # several seconds, and a fixed sleep photographs the splash.
+          i=1
+          while [ $i -le 30 ]; do
+            adb shell uiautomator dump /sdcard/window_dump.xml >/dev/null 2>&1
+            if adb shell grep -q "ClearLedger" /sdcard/window_dump.xml 2>/dev/null; then
+              echo "home screen visible after ${i}s"
+              exit 0
+            fi
+            sleep 1
+            i=$((i + 1))
+          done
+          echo "home screen not seen after 30s, screenshotting anyway"
+          SHEOF
+          chmod +x wait_home.sh
+
       - name: Run on emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -87,17 +111,7 @@ jobs:
           script: |
             adb install app/build/outputs/apk/debug/app-debug.apk
             adb shell am start -n com.clearledger.expenses/.MainActivity
-            # Wait until the home screen is actually up before screenshotting:
-            # on a cold emulator the app can sit on its splash icon for
-            # several seconds, and a fixed sleep photographs the splash.
-            for i in $(seq 1 30); do
-              adb shell uiautomator dump /sdcard/window_dump.xml >/dev/null 2>&1
-              if adb shell grep -q "ClearLedger" /sdcard/window_dump.xml 2>/dev/null; then
-                echo "home screen visible after ${i}s"
-                break
-              fi
-              sleep 1
-            done
+            ./wait_home.sh
             adb exec-out screencap -p > emulator-home.png
             python3 tap_fab.py
             sleep 3
