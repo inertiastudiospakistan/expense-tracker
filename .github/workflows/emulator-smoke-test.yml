@@ -1,0 +1,107 @@
+name: Emulator smoke test
+
+# Runs the built app on a real Android emulator in GitHub Actions and
+# takes screenshots, because there is no phone or emulator available on
+# the builder VM. Manual trigger only (Actions tab > Run workflow).
+# Free for this public repo. Uses the same unzip + JDK + SDK steps as
+# Android CI, then boots an API 36 emulator with KVM, installs the
+# debug APK, opens the app, taps the "Add entry" button and screenshots
+# both screens. Screenshots land as the "emulator-screenshots" artifact.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  emulator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Unzip project source
+        run: unzip -q -o expense-tracker.zip -d .
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: temurin
+
+      - name: Install Android 16 (API 36) platform and build-tools
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Drop local SDK path (points at the builder VM, invalid here)
+        run: rm -f local.properties
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build debug APK
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: Write the FAB tap helper
+        run: |
+          cat > tap_fab.py <<'PYEOF'
+          """Tap the "Add entry" button on the emulator via uiautomator dump."""
+          import re, subprocess, sys, xml.etree.ElementTree as ET
+
+          subprocess.run(["adb", "shell", "uiautomator", "dump", "/sdcard/window_dump.xml"], check=False)
+          subprocess.run(["adb", "pull", "/sdcard/window_dump.xml", "window_dump.xml"], check=False)
+          try:
+              tree = ET.parse("window_dump.xml")
+          except Exception as e:
+              print("tap helper: could not read window dump:", e)
+              sys.exit(0)
+          for node in tree.iter("node"):
+              desc = (node.get("content-desc") or "") + " " + (node.get("text") or "")
+              if "add entry" in desc.lower():
+                  m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.get("bounds") or "")
+                  if m:
+                      x1, y1, x2, y2 = map(int, m.groups())
+                      cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                      print("tap helper: tapping", desc.strip(), "at", cx, cy)
+                      subprocess.run(["adb", "shell", "input", "tap", str(cx), str(cy)])
+                      sys.exit(0)
+          print("tap helper: 'Add entry' button not found, skipping tap")
+          PYEOF
+
+      - name: Run on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          emulator-boot-timeout: 600
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            adb install app/build/outputs/apk/debug/app-debug.apk
+            adb shell am start -n com.clearledger.expenses/.MainActivity
+            sleep 6
+            adb exec-out screencap -p > emulator-home.png
+            python3 tap_fab.py
+            sleep 3
+            adb exec-out screencap -p > emulator-add.png
+            adb logcat -d | tail -100 > emulator-logcat.txt || true
+            ls -l emulator-home.png emulator-add.png
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-screenshots
+          path: |
+            emulator-home.png
+            emulator-add.png
+            emulator-logcat.txt
+          if-no-files-found: warn
